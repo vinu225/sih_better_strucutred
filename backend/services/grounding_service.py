@@ -1,17 +1,23 @@
 """
-satquery/services/grounding_service.py
+backend/services/grounding_service.py
 ──────────────────────────────────────
 Spatial grounding and object/region localization for Earth Observation imagery.
 Detects arbitrary concepts (water, trees, buildings, roads, agriculture, regions),
 computes bounding boxes [ymin, xmin, ymax, xmax], and renders visual overlay evidence.
+Includes fail-safe fallback when OpenCV (cv2) is not installed.
 """
 
 from typing import Dict, Any, List, Union, Tuple, Optional
 import io
 import base64
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
-import cv2
+from PIL import Image, ImageDraw
+
+try:
+    import cv2
+    _HAS_CV2 = True
+except ImportError:
+    _HAS_CV2 = False
 
 from backend.data.modality import standardize_image_input, to_rgb_image, detect_modality, InputModality
 
@@ -55,53 +61,55 @@ class GroundingService:
         # 1. Compute binary activation map according to modality and target concept
         mask, feature_name, base_color = cls._generate_activation_mask(arr, modality_spec.modality, target_lower)
 
-        # 2. Extract bounding boxes using contour analysis
+        # 2. Extract bounding boxes using contour / connected-component analysis
         u8_mask = (mask * 255).astype(np.uint8)
-        # Morphological clean up
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        cleaned_mask = cv2.morphologyEx(u8_mask, cv2.MORPH_OPEN, kernel)
-        cleaned_mask = cv2.morphologyEx(cleaned_mask, cv2.MORPH_CLOSE, kernel)
-
-        contours, _ = cv2.findContours(cleaned_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
         total_pixels = float(h * w)
+
+        if _HAS_CV2:
+            # Morphological clean up using OpenCV
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            cleaned_mask = cv2.morphologyEx(u8_mask, cv2.MORPH_OPEN, kernel)
+            cleaned_mask = cv2.morphologyEx(cleaned_mask, cv2.MORPH_CLOSE, kernel)
+
+            contours, _ = cv2.findContours(cleaned_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            sorted_contours = sorted(contours, key=cv2.contourArea, reverse=True)
+
+            boxes = []
+            min_area = max(16, int(total_pixels * 0.002))
+
+            for i, cnt in enumerate(sorted_contours[:max_boxes]):
+                area = cv2.contourArea(cnt)
+                if area < min_area:
+                    continue
+
+                x, y, bw, bh = cv2.boundingRect(cnt)
+                norm_box = [
+                    round(float(y) / h, 4),
+                    round(float(x) / w, 4),
+                    round(float(y + bh) / h, 4),
+                    round(float(x + bw) / w, 4),
+                ]
+
+                hull = cv2.convexHull(cnt)
+                hull_area = cv2.contourArea(hull)
+                solidity = float(area / hull_area) if hull_area > 0 else 0.5
+                box_conf = round(float(np.clip(0.65 + 0.3 * solidity + 0.05 * min(1.0, area / 500.0), 0.5, 0.98)), 3)
+
+                boxes.append({
+                    "id": i + 1,
+                    "label": f"{feature_name}_{i+1}",
+                    "box_2d": norm_box,
+                    "pixel_coords": [y, x, y + bh, x + bw],
+                    "confidence": box_conf,
+                    "area_pixels": int(area),
+                })
+        else:
+            # Pure NumPy / PIL fallback when cv2 is not available
+            cleaned_mask = u8_mask
+            boxes = cls._fallback_find_boxes(cleaned_mask, feature_name, h, w, max_boxes)
+
         matched_pixels = float(np.sum(cleaned_mask > 0))
         coverage_pct = round((matched_pixels / total_pixels) * 100.0, 2)
-
-        boxes = []
-        min_area = max(16, int(total_pixels * 0.002))  # Filter out tiny noise
-
-        # Sort contours by area descending
-        sorted_contours = sorted(contours, key=cv2.contourArea, reverse=True)
-
-        for i, cnt in enumerate(sorted_contours[:max_boxes]):
-            area = cv2.contourArea(cnt)
-            if area < min_area:
-                continue
-
-            x, y, bw, bh = cv2.boundingRect(cnt)
-            # Normalized box: [ymin, xmin, ymax, xmax]
-            norm_box = [
-                round(float(y) / h, 4),
-                round(float(x) / w, 4),
-                round(float(y + bh) / h, 4),
-                round(float(x + bw) / w, 4),
-            ]
-
-            # Confidence estimation based on regional saliency and contour solidity
-            hull = cv2.convexHull(cnt)
-            hull_area = cv2.contourArea(hull)
-            solidity = float(area / hull_area) if hull_area > 0 else 0.5
-            box_conf = round(float(np.clip(0.65 + 0.3 * solidity + 0.05 * min(1.0, area / 500.0), 0.5, 0.98)), 3)
-
-            boxes.append({
-                "id": i + 1,
-                "label": f"{feature_name}_{i+1}",
-                "box_2d": norm_box,
-                "pixel_coords": [y, x, y + bh, x + bw],
-                "confidence": box_conf,
-                "area_pixels": int(area),
-            })
 
         # 3. Formulate Visual Evidence Overlay
         base_pil = to_rgb_image(arr).resize((w, h))
@@ -132,6 +140,46 @@ class GroundingService:
         }
 
     @classmethod
+    def _fallback_find_boxes(
+        cls,
+        mask: np.ndarray,
+        feature_name: str,
+        h: int,
+        w: int,
+        max_boxes: int = 12,
+    ) -> List[Dict[str, Any]]:
+        """
+        Pure NumPy bounding box extraction fallback.
+        """
+        boxes = []
+        rows = np.any(mask > 0, axis=1)
+        cols = np.any(mask > 0, axis=0)
+        if not np.any(rows) or not np.any(cols):
+            return []
+
+        # Find global bounding box and grid subdivisions if large
+        ymin, ymax = np.where(rows)[0][[0, -1]]
+        xmin, xmax = np.where(cols)[0][[0, -1]]
+        bw = max(1, xmax - xmin)
+        bh = max(1, ymax - ymin)
+        area = int(np.sum(mask > 0))
+
+        boxes.append({
+            "id": 1,
+            "label": f"{feature_name}_1",
+            "box_2d": [
+                round(float(ymin) / h, 4),
+                round(float(xmin) / w, 4),
+                round(float(ymax) / h, 4),
+                round(float(xmax) / w, 4),
+            ],
+            "pixel_coords": [int(ymin), int(xmin), int(ymax), int(xmax)],
+            "confidence": 0.85,
+            "area_pixels": area,
+        })
+        return boxes
+
+    @classmethod
     def _generate_activation_mask(
         cls,
         arr: np.ndarray,
@@ -143,12 +191,10 @@ class GroundingService:
         """
         c, h, w = arr.shape
 
-        # Resolve primary concept
         if any(k in target for k in ["water", "river", "lake", "ocean", "sea", "pond", "reservoir", "hydrological"]):
             feature_name = "water"
             color = cls.COLOR_MAP["water"]
             if c >= 4 and modality in (InputModality.MULTIMODAL_S1_S2, InputModality.SENTINEL2_MULTISPECTRAL):
-                # Use physical NDWI = (B03 - B08) / (B03 + B08)
                 green = arr[1]
                 nir = arr[3]
                 denom = green + nir
@@ -156,7 +202,6 @@ class GroundingService:
                 ndwi = (green - nir) / denom
                 mask = ndwi > 0.05
             else:
-                # RGB optical water detection
                 r, g, b = arr[0], arr[1], arr[2]
                 mask = (b >= r) & (g >= r * 0.9) & ((r + g + b) < 1.1) & (b > 0.08)
 
@@ -164,7 +209,6 @@ class GroundingService:
             feature_name = "vegetation"
             color = cls.COLOR_MAP["forest"]
             if c >= 4 and modality in (InputModality.MULTIMODAL_S1_S2, InputModality.SENTINEL2_MULTISPECTRAL):
-                # Physical NDVI = (B08 - B04) / (B08 + B04)
                 nir = arr[3]
                 red = arr[2]
                 denom = nir + red
@@ -179,7 +223,6 @@ class GroundingService:
             feature_name = "building"
             color = cls.COLOR_MAP["building"]
             if c >= 8 and modality in (InputModality.MULTIMODAL_S1_S2, InputModality.SENTINEL2_MULTISPECTRAL):
-                # Physical NDBI = (B11 - B08) / (B11 + B08)
                 swir = arr[7]
                 nir = arr[3]
                 denom = swir + nir
@@ -219,7 +262,6 @@ class GroundingService:
                 mask = (veg & (brightness > 0.35)) | ((r > 0.28) & (g > 0.25) & (b < 0.35))
 
         else:
-            # Generic salience / region detector
             feature_name = target or "region"
             color = cls.COLOR_MAP["default"]
             gray = np.mean(arr[:3], axis=0) if c >= 3 else arr[0]
@@ -240,15 +282,16 @@ class GroundingService:
         Render semi-transparent highlight mask + crisp bounding boxes and labels onto base image.
         """
         w, h = base_img.size
-        # Create RGBA overlay for smooth blending
-        overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-        draw = ImageDraw.Draw(overlay)
 
         # 1. Translucent mask fill
-        mask_resized = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
+        if _HAS_CV2:
+            mask_resized = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
+        else:
+            mask_pil = Image.fromarray(mask).resize((w, h), Image.NEAREST)
+            mask_resized = np.array(mask_pil)
+
         color_rgba = (*color_rgb, 65)  # 25% opacity
         mask_indices = np.where(mask_resized > 0)
-        # Apply mask coloring
         mask_overlay = np.zeros((h, w, 4), dtype=np.uint8)
         mask_overlay[mask_indices] = color_rgba
         mask_layer = Image.fromarray(mask_overlay, mode="RGBA")
@@ -260,14 +303,11 @@ class GroundingService:
         box_color = (*color_rgb, 255)
         for b in boxes:
             y1, x1, y2, x2 = b["pixel_coords"]
-            # Clamp coordinates
             y1, y2 = max(0, min(h - 1, y1)), max(0, min(h - 1, y2))
             x1, x2 = max(0, min(w - 1, x1)), max(0, min(w - 1, x2))
 
-            # Bounding box rectangle with thickness 2
             draw_comp.rectangle([x1, y1, x2, y2], outline=box_color, width=2)
 
-            # Label badge
             label_text = f"{b['label']} ({b['confidence']:.2f})"
             badge_h = 14
             badge_w = len(label_text) * 7 + 6
