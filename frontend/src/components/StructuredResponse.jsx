@@ -1,0 +1,677 @@
+import React, { useState } from 'react';
+import {
+  ChevronDown,
+  ChevronRight,
+  Sparkles,
+  Layers,
+  AlertTriangle,
+  CheckCircle2,
+  BrainCircuit,
+  Activity,
+  BarChart3,
+  Radio,
+  ScanEye,
+  Sliders,
+} from 'lucide-react';
+
+/**
+ * Format inline text (e.g. **bold**, `code`).
+ */
+export function formatInlineText(text) {
+  if (!text || typeof text !== 'string') return text;
+
+  // Split by markdown bold (**text**) or inline code (`text`)
+  const parts = [];
+  const regex = /(\*\*[^*]+\*\*|`[^`]+`)/g;
+  let lastIndex = 0;
+  let match;
+
+  while ((match = regex.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      parts.push(text.substring(lastIndex, match.index));
+    }
+    const token = match[0];
+    if (token.startsWith('**') && token.endsWith('**')) {
+      parts.push(
+        <strong key={match.index} className="font-semibold text-slate-900">
+          {token.slice(2, -2)}
+        </strong>
+      );
+    } else if (token.startsWith('`') && token.endsWith('`')) {
+      parts.push(
+        <code
+          key={match.index}
+          className="px-1.5 py-0.5 rounded bg-slate-100 text-slate-800 font-mono text-[11px] border border-slate-200"
+        >
+          {token.slice(1, -1)}
+        </code>
+      );
+    }
+    lastIndex = regex.lastIndex;
+  }
+
+  if (lastIndex < text.length) {
+    parts.push(text.substring(lastIndex));
+  }
+
+  return parts.length > 0 ? parts : text;
+}
+
+/**
+ * Normalizes tool name for display and lookup.
+ */
+function normalizeToolName(tool) {
+  if (!tool) return 'unknown';
+  const t = tool.toLowerCase().trim();
+  if (t.includes('spectral') || t === 'spectral_analysis') return 'spectral_analysis';
+  if (t.includes('classif') || t === 'landcover_classification') return 'landcover_classification';
+  if (t.includes('vlm') || t.includes('visual_qa') || t.includes('vqa') || t.includes('scene_analysis')) return 'visual_qa';
+  if (t.includes('band') || t.includes('metadata')) return 'band_metadata';
+  if (t.includes('sar')) return 'sar_analysis';
+  if (t.includes('ground') || t.includes('localiz')) return 'grounding';
+  if (t.includes('change')) return 'change_detection';
+  return t;
+}
+
+/**
+ * Parses markdown text sections split by `### ` headings as a fallback.
+ */
+function parseMarkdownSections(rawText) {
+  if (!rawText) return { shortAnswer: '', sections: {} };
+
+  const sections = {};
+  const split = rawText.split(/(?:^|\n)###\s+/);
+
+  let shortAnswer = split[0]?.trim() || '';
+
+  for (let i = 1; i < split.length; i++) {
+    const chunk = split[i];
+    const firstLineEnd = chunk.indexOf('\n');
+    let title = '';
+    let body = '';
+
+    if (firstLineEnd === -1) {
+      title = chunk.trim();
+      body = '';
+    } else {
+      title = chunk.substring(0, firstLineEnd).trim();
+      body = chunk.substring(firstLineEnd + 1).trim();
+    }
+
+    const tLower = title.toLowerCase();
+    if (tLower.includes('executive')) {
+      sections.executive_finding = body;
+      if (!shortAnswer) shortAnswer = body;
+    } else if (tLower.includes('spectral')) {
+      sections.spectral_analysis = body;
+    } else if (tLower.includes('vlm') || tLower.includes('visual') || tLower.includes('insight')) {
+      sections.visual_qa = body;
+    } else if (tLower.includes('band') || tLower.includes('optical')) {
+      sections.band_metadata = body;
+    } else if (tLower.includes('sar')) {
+      sections.sar_analysis = body;
+    } else {
+      sections[title] = body;
+    }
+  }
+
+  // If short answer is still empty or is just generic, fallback to executive finding or first section
+  if (!shortAnswer && sections.executive_finding) {
+    shortAnswer = sections.executive_finding;
+  } else if (!shortAnswer && sections.visual_qa) {
+    shortAnswer = sections.visual_qa;
+  } else if (!shortAnswer) {
+    shortAnswer = rawText.split('\n\n')[0] || rawText;
+  }
+
+  return { shortAnswer, sections };
+}
+
+/**
+ * Checks if a spectral result is skipped / unavailable.
+ */
+function isSpectralSkipped(spectralData, rawTextSection, detectedModality) {
+  const modLower = (detectedModality || '').toLowerCase();
+  const isRgbOnly = modLower.includes('rgb') && !modLower.includes('12') && !modLower.includes('multispectral');
+
+  if (spectralData) {
+    if (spectralData.status === 'UNAVAILABLE') return true;
+    const ndvi = spectralData.ndvi_mean;
+    const ndwi = spectralData.ndwi_mean;
+    const ndbi = spectralData.ndbi_mean;
+    const isValNull = (v) => v === null || v === undefined || v === 'N/A' || isNaN(Number(v));
+    if (isValNull(ndvi) && isValNull(ndwi) && isValNull(ndbi)) {
+      return true;
+    }
+  }
+
+  if (rawTextSection) {
+    const textLower = rawTextSection.toLowerCase();
+    if (textLower.includes('mean `n/a`') || textLower.includes('mean n/a')) {
+      // Check if all are N/A
+      const hasValidNumber = /mean `?[-+]?\d*\.?\d+`?/i.test(rawTextSection);
+      if (!hasValidNumber) return true;
+    }
+    if (textLower.includes('bands are absent') || textLower.includes('requires sentinel-2 near-infrared') || textLower.includes('standard rgb optical')) {
+      return true;
+    }
+  }
+
+  if (isRgbOnly && (!spectralData || !spectralData.ndvi_mean)) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Main StructuredResponse component.
+ */
+export default function StructuredResponse({
+  text = '',
+  plan = [],
+  toolArtifacts = {},
+  visualEvidence = null,
+  executionTrace = [],
+  detectedModality = 'RGB optical',
+}) {
+  const [isComputedOpen, setIsComputedOpen] = useState(false);
+
+  // Parse markdown fallback
+  const { shortAnswer: parsedShortAnswer, sections: parsedSections } = parseMarkdownSections(text);
+
+  // Derive short answer
+  let mainShortAnswer = parsedShortAnswer;
+  if (!mainShortAnswer && toolArtifacts?.classification?.primary_class) {
+    const conf = toolArtifacts.classification.confidence
+      ? `(confidence: ${(toolArtifacts.classification.confidence * 100).toFixed(1)}%)`
+      : '';
+    mainShortAnswer = `The evaluated satellite tile is characterized predominantly as **${toolArtifacts.classification.primary_class}** ${conf}.`;
+  }
+
+  // Determine list of tools to render (exclude meta-properties like trace/confidence)
+  const ignoredKeys = new Set(['trace', 'confidence', 'selected_tool', 'visual_evidence']);
+  const artifactKeys = Object.keys(toolArtifacts).filter((k) => !ignoredKeys.has(k));
+  
+  const rawTools = plan && plan.length > 0
+    ? plan.filter((k) => !ignoredKeys.has(k))
+    : artifactKeys.length > 0
+    ? artifactKeys
+    : Object.keys(parsedSections);
+
+  // If no tools detected but text exists, default to VLM / visual_qa
+  const effectiveTools = rawTools.length > 0 ? rawTools : ['visual_qa'];
+
+  // Normalize tool list (avoid duplicate canonical keys)
+  const normalizedToolList = Array.from(new Set(effectiveTools.map(normalizeToolName)));
+
+  // Format Modality Label
+  let displayModality = detectedModality;
+  if (!displayModality || displayModality === 'UNKNOWN') {
+    displayModality = 'RGB optical';
+  } else if (displayModality.toUpperCase() === 'RGB_OPTICAL') {
+    displayModality = 'RGB optical';
+  } else if (displayModality.toUpperCase() === 'MULTIMODAL_S1_S2') {
+    displayModality = '12-channel S2+S1';
+  } else if (displayModality.toUpperCase() === 'SENTINEL2_MULTISPECTRAL') {
+    displayModality = 'Sentinel-2 (12 bands)';
+  } else if (displayModality.toUpperCase() === 'SAR_ONLY') {
+    displayModality = 'SAR Radar';
+  }
+
+  const traceList = (executionTrace && executionTrace.length > 0)
+    ? executionTrace
+    : (toolArtifacts?.trace || []);
+
+  return (
+    <div className="space-y-3.5">
+      {/* 1. Short Answer */}
+      <div className="text-xs sm:text-sm text-slate-800 leading-relaxed bg-slate-50/60 p-3.5 rounded-xl border border-slate-100">
+        <p className="font-normal">{formatInlineText(mainShortAnswer)}</p>
+      </div>
+
+      {/* 2. Collapsible "How this was computed" Panel */}
+      <div className="border border-brand-border/80 rounded-xl overflow-hidden bg-white shadow-2xs">
+        {/* Panel Accordion Header */}
+        <button
+          type="button"
+          onClick={() => setIsComputedOpen((prev) => !prev)}
+          className="w-full px-3.5 py-2.5 bg-slate-50/80 hover:bg-slate-100/80 transition-colors flex items-center justify-between text-left group cursor-pointer"
+        >
+          <div className="flex items-center gap-2 min-w-0">
+            <div className="p-1 rounded-md bg-brand-blue-tint text-brand-blue shrink-0">
+              <Sparkles className="w-3.5 h-3.5" />
+            </div>
+            <span className="text-xs font-semibold text-brand-dark">How this was computed</span>
+            {/* 4. Detected Modality Badge */}
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-blue-50 text-brand-blue border border-blue-100 truncate">
+              <Layers className="w-2.5 h-2.5 shrink-0" />
+              <span>{displayModality}</span>
+            </span>
+          </div>
+
+          <div className="flex items-center gap-1.5 text-slate-400 group-hover:text-slate-600 transition-colors shrink-0">
+            <span className="text-[11px] font-medium text-slate-500">
+              {normalizedToolList.length} tool{normalizedToolList.length !== 1 ? 's' : ''}
+            </span>
+            {isComputedOpen ? (
+              <ChevronDown className="w-4 h-4 text-slate-500 transition-transform duration-200" />
+            ) : (
+              <ChevronRight className="w-4 h-4 text-slate-400 transition-transform duration-200" />
+            )}
+          </div>
+        </button>
+
+        {/* Collapsed/Expanded Content */}
+        {isComputedOpen && (
+          <div className="p-3.5 space-y-3 divide-y divide-slate-100 bg-white border-t border-slate-100">
+            {/* Auditable Execution Trace Steps */}
+            {traceList.length > 0 && (
+              <div className="pb-3 space-y-1.5">
+                <span className="text-[11px] font-bold text-slate-700 uppercase tracking-wider block">
+                  Auditable Execution Pipeline
+                </span>
+                <div className="flex flex-wrap gap-1.5">
+                  {traceList.map((step, sIdx) => (
+                    <span
+                      key={sIdx}
+                      className="inline-flex items-center gap-1 px-2 py-1 rounded bg-slate-100 border border-slate-200 text-[11px] text-slate-700 font-medium font-mono"
+                    >
+                      <span className="w-3.5 h-3.5 rounded-full bg-brand-blue/10 text-brand-blue flex items-center justify-center text-[9px] font-bold">
+                        {sIdx + 1}
+                      </span>
+                      {step}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {normalizedToolList.map((toolKey, idx) => (
+              <ToolRow
+                key={idx}
+                toolKey={toolKey}
+                toolArtifacts={toolArtifacts}
+                visualEvidence={visualEvidence}
+                parsedSections={parsedSections}
+                detectedModality={displayModality}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Individual Tool Execution Row.
+ */
+function ToolRow({ toolKey, toolArtifacts, visualEvidence, parsedSections, detectedModality }) {
+  // Classification Tool
+  if (toolKey === 'landcover_classification' || toolKey === 'classification') {
+    const clsArtifact = toolArtifacts?.landcover_classification || toolArtifacts?.classification || {};
+    const primaryClass = clsArtifact.primary_class || 'Land Cover Classifier';
+    const confidence = clsArtifact.confidence !== undefined
+      ? clsArtifact.confidence
+      : clsArtifact.primary_confidence;
+    const modelUsed = clsArtifact.model_used || 'BigEarthNet MobileViT-s';
+    const rawText = parsedSections.executive_finding || parsedSections.landcover_classification;
+
+    return (
+      <div className="pt-3 first:pt-0 space-y-2">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <div className="w-6 h-6 rounded-lg bg-emerald-50 text-emerald-600 flex items-center justify-center shrink-0">
+              <BarChart3 className="w-3.5 h-3.5" />
+            </div>
+            <div>
+              <div className="flex items-center gap-1.5">
+                <span className="text-xs font-bold text-slate-800">Land Cover Classification</span>
+                <span className="px-1.5 py-0.2 rounded text-[10px] font-semibold bg-emerald-100 text-emerald-800">
+                  Ran
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-500 font-medium">Model: {modelUsed}</p>
+            </div>
+          </div>
+        </div>
+
+        {/* Key Values */}
+        <div className="bg-slate-50 rounded-lg p-2.5 border border-slate-100 flex flex-wrap items-center gap-3 text-xs">
+          <div className="flex items-center gap-1.5">
+            <span className="text-slate-500 font-medium">Dominant Class:</span>
+            <span className="font-semibold text-slate-800">{primaryClass}</span>
+          </div>
+          {confidence !== undefined && (
+            <div className="flex items-center gap-1.5">
+              <span className="text-slate-500 font-medium">Confidence:</span>
+              <span className="font-bold text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200">
+                {(confidence <= 1 ? confidence * 100 : confidence).toFixed(1)}%
+              </span>
+            </div>
+          )}
+          {rawText && !clsArtifact.primary_class && (
+            <p className="text-slate-600 text-[11px] w-full">{formatInlineText(rawText)}</p>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // Spectral Analysis Tool
+  if (toolKey === 'spectral_analysis' || toolKey === 'spectral') {
+    const specArtifact = toolArtifacts?.spectral_analysis || toolArtifacts?.spectral || {};
+    const rawText = parsedSections.spectral_analysis || '';
+    const isSkipped = isSpectralSkipped(specArtifact, rawText, detectedModality);
+
+    if (isSkipped) {
+      return (
+        <div className="pt-3 first:pt-0 space-y-2">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <div className="w-6 h-6 rounded-lg bg-amber-50 text-amber-600 flex items-center justify-center shrink-0">
+                <Activity className="w-3.5 h-3.5" />
+              </div>
+              <div>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-xs font-bold text-slate-800">Spectral Index Analysis (NDVI / NDWI / NDBI)</span>
+                  <span className="px-1.5 py-0.2 rounded text-[10px] font-semibold bg-amber-100 text-amber-800">
+                    Skipped
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Skipped Message Requirement */}
+          <div className="bg-amber-50/70 border border-amber-200/80 rounded-lg p-2.5 flex items-center gap-2 text-xs text-amber-900">
+            <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+            <span className="font-medium">
+              Skipped: needs NIR/SWIR bands (image is RGB)
+            </span>
+          </div>
+        </div>
+      );
+    }
+
+    // Ran State for Spectral Analysis
+    const cov = specArtifact.coverage || specArtifact.coverage_estimates || {};
+    const ndvi = specArtifact.ndvi_mean;
+    const ndwi = specArtifact.ndwi_mean;
+    const ndbi = specArtifact.ndbi_mean;
+    const assessment = specArtifact.assessment;
+
+    return (
+      <div className="pt-3 first:pt-0 space-y-2">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <div className="w-6 h-6 rounded-lg bg-emerald-50 text-emerald-600 flex items-center justify-center shrink-0">
+              <Activity className="w-3.5 h-3.5" />
+            </div>
+            <div>
+              <div className="flex items-center gap-1.5">
+                <span className="text-xs font-bold text-slate-800">Spectral Index Analysis</span>
+                <span className="px-1.5 py-0.2 rounded text-[10px] font-semibold bg-emerald-100 text-emerald-800">
+                  Ran
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-500 font-medium">Bands: B04 (Red), B08 (NIR), B03 (Green), B11 (SWIR)</p>
+            </div>
+          </div>
+        </div>
+
+        {/* Key Values */}
+        <div className="bg-slate-50 rounded-lg p-2.5 border border-slate-100 space-y-2 text-xs">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+            {ndvi !== undefined && ndvi !== null && (
+              <div className="bg-white p-2 rounded-md border border-slate-200">
+                <span className="text-[10px] uppercase font-bold text-emerald-700 block">NDVI (Vegetation)</span>
+                <span className="text-xs font-bold text-slate-800">{Number(ndvi).toFixed(3)}</span>
+                {cov.dense_vegetation_percent !== undefined && (
+                  <span className="text-[10px] text-slate-500 block">Canopy: {cov.dense_vegetation_percent}%</span>
+                )}
+              </div>
+            )}
+            {ndwi !== undefined && ndwi !== null && (
+              <div className="bg-white p-2 rounded-md border border-slate-200">
+                <span className="text-[10px] uppercase font-bold text-blue-700 block">NDWI (Water)</span>
+                <span className="text-xs font-bold text-slate-800">{Number(ndwi).toFixed(3)}</span>
+                {cov.water_body_percent !== undefined && (
+                  <span className="text-[10px] text-slate-500 block">Water: {cov.water_body_percent}%</span>
+                )}
+              </div>
+            )}
+            {ndbi !== undefined && ndbi !== null && (
+              <div className="bg-white p-2 rounded-md border border-slate-200">
+                <span className="text-[10px] uppercase font-bold text-orange-700 block">NDBI (Built-up)</span>
+                <span className="text-xs font-bold text-slate-800">{Number(ndbi).toFixed(3)}</span>
+                {cov.builtup_percent !== undefined && (
+                  <span className="text-[10px] text-slate-500 block">Urban: {cov.builtup_percent}%</span>
+                )}
+              </div>
+            )}
+          </div>
+
+          {assessment && (
+            <p className="text-[11px] text-slate-600 italic border-t border-slate-200/60 pt-1.5">
+              {assessment}
+            </p>
+          )}
+
+          {!ndvi && rawText && (
+            <div className="text-[11px] text-slate-700 whitespace-pre-wrap">
+              {formatInlineText(rawText)}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // Model interpretation (VLM / Visual QA)
+  if (toolKey === 'visual_qa' || toolKey === 'vlm' || toolKey === 'rgb_scene_analysis') {
+    const vlmArtifact = toolArtifacts?.visual_qa || toolArtifacts?.vlm || {};
+    const insightText = vlmArtifact.answer || parsedSections.visual_qa || '';
+
+    return (
+      <div className="pt-3 first:pt-0 space-y-2">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <div className="w-6 h-6 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0">
+              <BrainCircuit className="w-3.5 h-3.5" />
+            </div>
+            <div>
+              <div className="flex items-center gap-1.5">
+                <span className="text-xs font-bold text-slate-800">Model interpretation</span>
+                <span className="px-1.5 py-0.2 rounded text-[10px] font-semibold bg-indigo-100 text-indigo-800">
+                  VLM Reasoning
+                </span>
+              </div>
+              <p className="text-[10px] text-indigo-600 font-medium">
+                Generated by AI model · Not directly measured from sensors
+              </p>
+            </div>
+          </div>
+        </div>
+
+        {insightText && (
+          <div className="bg-indigo-50/40 rounded-lg p-2.5 border border-indigo-100/80 text-xs text-slate-700 leading-relaxed">
+            {formatInlineText(insightText)}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // Band Metadata Tool
+  if (toolKey === 'band_metadata' || toolKey === 'metadata') {
+    const metaArtifact = toolArtifacts?.band_metadata || toolArtifacts?.metadata;
+    const rawText = parsedSections.band_metadata;
+
+    return (
+      <div className="pt-3 first:pt-0 space-y-2">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <div className="w-6 h-6 rounded-lg bg-slate-100 text-slate-700 flex items-center justify-center shrink-0">
+              <Sliders className="w-3.5 h-3.5" />
+            </div>
+            <div>
+              <div className="flex items-center gap-1.5">
+                <span className="text-xs font-bold text-slate-800">Sensor Band Metadata</span>
+                <span className="px-1.5 py-0.2 rounded text-[10px] font-semibold bg-slate-200 text-slate-800">
+                  Ran
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-500 font-medium">Spectral Wavelength Specifications</p>
+            </div>
+          </div>
+        </div>
+
+        <div className="bg-slate-50 rounded-lg p-2.5 border border-slate-100 text-xs text-slate-700 font-mono text-[11px] overflow-x-auto">
+          {typeof metaArtifact === 'object' ? (
+            <pre className="text-[11px]">{JSON.stringify(metaArtifact, null, 2)}</pre>
+          ) : (
+            formatInlineText(rawText || 'Band configuration retrieved.')
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // SAR Microwave Analysis
+  if (toolKey === 'sar_analysis' || toolKey === 'sar') {
+    const sarArtifact = toolArtifacts?.sar_analysis || toolArtifacts?.sar || {};
+    const rawText = parsedSections.sar_analysis;
+
+    return (
+      <div className="pt-3 first:pt-0 space-y-2">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <div className="w-6 h-6 rounded-lg bg-cyan-50 text-cyan-700 flex items-center justify-center shrink-0">
+              <Radio className="w-3.5 h-3.5" />
+            </div>
+            <div>
+              <div className="flex items-center gap-1.5">
+                <span className="text-xs font-bold text-slate-800">SAR Microwave Analysis (Sentinel-1)</span>
+                <span className="px-1.5 py-0.2 rounded text-[10px] font-semibold bg-cyan-100 text-cyan-800">
+                  Ran
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-500 font-medium">Active Radar Backscatter</p>
+            </div>
+          </div>
+        </div>
+
+        <div className="bg-slate-50 rounded-lg p-2.5 border border-slate-100 text-xs text-slate-700">
+          {sarArtifact.channel_labels ? (
+            <div className="flex gap-2">
+              <span className="text-slate-500">Channels:</span>
+              <span className="font-semibold text-slate-800">{sarArtifact.channel_labels.join(', ')}</span>
+            </div>
+          ) : (
+            formatInlineText(rawText || 'SAR analysis executed.')
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // Grounding / Localization
+  if (toolKey === 'grounding' || toolKey === 'grounding_localization') {
+    const groundData = toolArtifacts?.grounding || toolArtifacts?.grounding_localization || visualEvidence || toolArtifacts?.visual_evidence || {};
+    const boxes = groundData.boxes || [];
+    const count = groundData.count !== undefined ? groundData.count : boxes.length;
+    const target = groundData.target || groundData.target_concept || 'Target';
+    const coverage = groundData.coverage_percent !== undefined ? groundData.coverage_percent : null;
+    const rawConf = groundData.confidence !== undefined ? groundData.confidence : null;
+    const conf = rawConf !== null ? (rawConf <= 1 ? (rawConf * 100).toFixed(1) : rawConf) : null;
+
+    return (
+      <div className="pt-3 first:pt-0 space-y-2">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <div className="w-6 h-6 rounded-lg bg-purple-50 text-purple-700 flex items-center justify-center shrink-0">
+              <ScanEye className="w-3.5 h-3.5" />
+            </div>
+            <div>
+              <div className="flex items-center gap-1.5">
+                <span className="text-xs font-bold text-slate-800">Spatial Grounding & Localization</span>
+                <span className="px-1.5 py-0.2 rounded text-[10px] font-semibold bg-purple-100 text-purple-800">
+                  Ran
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-500 font-medium">Target: {target}</p>
+            </div>
+          </div>
+        </div>
+
+        <div className="bg-slate-50 rounded-lg p-2.5 border border-slate-100 space-y-2 text-xs">
+          <div className="grid grid-cols-3 gap-2">
+            <div className="bg-white p-2 rounded-md border border-slate-200">
+              <span className="text-[10px] uppercase font-bold text-purple-700 block">Detections</span>
+              <span className="text-xs font-bold text-slate-800">{count} region{count !== 1 ? 's' : ''}</span>
+            </div>
+            {coverage !== null && (
+              <div className="bg-white p-2 rounded-md border border-slate-200">
+                <span className="text-[10px] uppercase font-bold text-purple-700 block">Coverage</span>
+                <span className="text-xs font-bold text-slate-800">{coverage}%</span>
+              </div>
+            )}
+            {conf !== null && (
+              <div className="bg-white p-2 rounded-md border border-slate-200">
+                <span className="text-[10px] uppercase font-bold text-purple-700 block">Mean Conf.</span>
+                <span className="text-xs font-bold text-slate-800">{conf}%</span>
+              </div>
+            )}
+          </div>
+
+          {boxes.length > 0 && (
+            <div className="space-y-1 pt-1">
+              <span className="text-[11px] font-semibold text-slate-700 block">Localized Bounding Boxes:</span>
+              <div className="max-h-32 overflow-y-auto space-y-1 font-mono text-[10px]">
+                {boxes.map((b, bIdx) => (
+                  <div key={bIdx} className="bg-white px-2 py-1 rounded border border-slate-200 flex items-center justify-between">
+                    <span className="font-semibold text-purple-800">{b.label || `Box #${b.id || bIdx + 1}`}</span>
+                    <span className="text-slate-500">[{b.box_2d ? b.box_2d.map((v) => Number(v).toFixed(3)).join(', ') : (b.pixel_coords ? b.pixel_coords.join(', ') : '')}]</span>
+                    <span className="font-bold text-slate-700">{(b.confidence * 100).toFixed(1)}%</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // Generic Fallback Row for any other tool
+  const genericText = parsedSections[toolKey] || '';
+  const cleanTitle = toolKey.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+
+  return (
+    <div className="pt-3 first:pt-0 space-y-2">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <div className="w-6 h-6 rounded-lg bg-slate-100 text-slate-700 flex items-center justify-center shrink-0">
+            <CheckCircle2 className="w-3.5 h-3.5 text-brand-blue" />
+          </div>
+          <div>
+            <div className="flex items-center gap-1.5">
+              <span className="text-xs font-bold text-slate-800">{cleanTitle}</span>
+              <span className="px-1.5 py-0.2 rounded text-[10px] font-semibold bg-slate-100 text-slate-700">
+                Ran
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {genericText && (
+        <div className="bg-slate-50 rounded-lg p-2.5 border border-slate-100 text-xs text-slate-700 leading-relaxed">
+          {formatInlineText(genericText)}
+        </div>
+      )}
+    </div>
+  );
+}

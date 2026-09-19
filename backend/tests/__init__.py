@@ -1,0 +1,3 @@
+"""
+SatQuery Automated Test Suite.
+"""

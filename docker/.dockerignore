@@ -1,0 +1,30 @@
+# Git & IDE
+.git
+.gitignore
+.vscode
+.idea
+.pytest_cache
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+
+# Node
+frontend/node_modules/
+node_modules/
+frontend/dist/
+dist/
+npm-debug.log*
+
+# Models & Caches
+_hf_cache/
+.cache/
+*.npy
+*.pth
+*.pt
+
+# Redundant directories
+sih_2026_prototype/
