@@ -1,10 +1,10 @@
 import React from 'react';
 import { NavLink } from 'react-router-dom';
-import { MessageSquare, Info, Satellite } from 'lucide-react';
+import { MessageSquare, ArrowLeftRight, Info, Satellite } from 'lucide-react';
 
 export default function Sidebar() {
   return (
-    <aside className="relative overflow-hidden w-full lg:w-[320px] lg:min-h-screen bg-white border-b lg:border-b-0 lg:border-r border-brand-border flex flex-col p-6 z-20 shrink-0">
+    <aside className="relative overflow-hidden w-full lg:w-[320px] lg:min-h-screen bg-white border-b lg:border-b-0 lg:border-r border-brand-border flex flex-col justify-between p-6 z-20 shrink-0">
       {/* Background Image on Desktop (Hidden under 900px / mobile) - Full strength, center bottom */}
       <div
         className="hidden lg:block absolute inset-0 bg-no-repeat pointer-events-none"
@@ -71,6 +71,25 @@ export default function Sidebar() {
           </NavLink>
 
           <NavLink
+            to="/change"
+            style={({ isActive }) => ({
+              backgroundColor: isActive ? undefined : 'rgba(255, 255, 255, 0.55)',
+              backdropFilter: 'blur(6px)',
+              WebkitBackdropFilter: 'blur(6px)',
+            })}
+            className={({ isActive }) =>
+              `flex items-center gap-3 px-4 py-[14px] rounded-xl font-semibold text-[16px] transition-all duration-150 border ${
+                isActive
+                  ? 'bg-brand-blue-tint text-brand-blue shadow-sm border-brand-blue/20'
+                  : 'text-brand-dark hover:bg-white/80 border-white/50 shadow-2xs'
+              }`
+            }
+          >
+            <ArrowLeftRight className="w-5 h-5 shrink-0" />
+            <span>Change Detection</span>
+          </NavLink>
+
+          <NavLink
             to="/about"
             style={({ isActive }) => ({
               backgroundColor: isActive ? undefined : 'rgba(255, 255, 255, 0.55)',
@@ -90,7 +109,16 @@ export default function Sidebar() {
           </NavLink>
         </nav>
       </div>
+
+      {/* Bottom Slogan on Desktop */}
+      <div className="relative z-10 hidden lg:block pt-6">
+        <p className="text-sm font-bold text-slate-800 drop-shadow-2xs">
+          From Space to
+          <br />
+          Real-World Solutions
+        </p>
+        <div className="w-8 h-0.5 bg-brand-blue rounded-full mt-2" />
+      </div>
     </aside>
   );
 }
-

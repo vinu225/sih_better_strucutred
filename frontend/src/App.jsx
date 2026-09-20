@@ -2,6 +2,7 @@ import React from 'react';
 import { Routes, Route } from 'react-router-dom';
 import Sidebar from './components/Sidebar';
 import ChatPage from './pages/ChatPage';
+import ChangeDetectionPage from './pages/ChangeDetectionPage';
 import AboutPage from './pages/AboutPage';
 import { ChatProvider } from './context/ChatContext';
 import { Sparkles } from 'lucide-react';
@@ -27,6 +28,7 @@ export default function App() {
 
           <Routes>
             <Route path="/" element={<ChatPage />} />
+            <Route path="/change" element={<ChangeDetectionPage />} />
             <Route path="/about" element={<AboutPage />} />
           </Routes>
         </main>

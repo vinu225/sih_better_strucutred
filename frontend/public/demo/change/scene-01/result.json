@@ -1,0 +1,47 @@
+{
+  "before_label": null,
+  "after_label": null,
+  "location": null,
+  "illustrative": true,
+  "stats": {
+    "changed_percent": 13.5,
+    "increase_percent": 0.7,
+    "decrease_percent": 9.6,
+    "categories": [
+      {
+        "label": "Vegetation loss",
+        "percent": 9.6
+      },
+      {
+        "label": "Built-up increase",
+        "percent": 0.7
+      },
+      {
+        "label": "Water and shoreline change",
+        "percent": 3.1
+      },
+      {
+        "label": "Other change",
+        "percent": 0.1
+      }
+    ]
+  },
+  "tools_used": [
+    "Change detection"
+  ],
+  "answers": {
+    "overview": "Comparing the two scenes reveals an estimated 13.5% overall surface area modification. The primary changes include 9.6% vegetation loss mostly in the upper-right part of the image and 0.7% built-up expansion in the central part of the image. Use the divider slider above to compare the two time periods directly.",
+    "vegetation": "Vegetation analysis indicates an estimated 9.6% reduction in dense green canopy, concentrated mostly in the upper-right part of the image. Sliding the divider reveals where green cover has altered across the landscape. You can ask about built-up expansion or water bodies for further details.",
+    "deforestation": "Canopy coverage data shows an estimated 9.6% loss in tree and forest cover, situated mostly in the upper-right part of the image. The comparison highlights cleared patches where original dense canopy has transitioned to open ground. You can use the slider to contrast earlier tree margins.",
+    "urban": "Built-up terrain and impervious surfaces increased by an estimated 0.7%, concentrated in the central part of the image. The later observation highlights new structures, roads, and developed parcels. Drag the slider to inspect the exact progression of new infrastructure.",
+    "water": "Hydrological and shoreline features show an estimated 3.1% variation mostly in the upper-right part of the image. Surface water boundaries and moisture margins exhibit localized adjustments between the two time periods. Sliding the divider allows you to inspect shoreline changes.",
+    "howMuch": "Total surface change across the evaluated scene is estimated at 13.5%. This comprises 9.6% vegetation loss, 0.7% built-up increase, 3.1% water change, and 0.1% other surface modifications. The detailed analysis card below displays the complete category breakdown.",
+    "showDifference": "The difference map highlights areas exceeding the change detection threshold, covering 13.5% of the total scene. High-magnitude modifications appear in yellow to red highlights across the image. You can adjust the difference overlay opacity using the slider controls above.",
+    "fallback": "Temporal comparison shows noticeable landscape modifications across 13.5% of the image. Moving the slider divider allows you to inspect specific features side by side. Ask about vegetation, built-up areas, or water bodies for category details."
+  },
+  "follow_ups": [
+    "What changed in vegetation?",
+    "Show urban expansion",
+    "How much total area changed?"
+  ]
+}
