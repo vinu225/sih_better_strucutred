@@ -35,9 +35,14 @@ export default function MessageBubble({ message, isLast = false }) {
 
   // Assistant Message
   const predictions = message.toolArtifacts?.classification?.top_predictions || [];
+  const isNew = Boolean(message.isNew);
 
   return (
-    <div className="flex items-start gap-3 mb-6 max-w-full">
+    <div
+      className={`flex items-start gap-3 mb-6 max-w-full ${
+        isNew ? 'animate-reveal-0' : ''
+      }`}
+    >
       {/* Bot Avatar */}
       <div className="w-8 h-8 rounded-xl bg-gradient-to-tr from-brand-blue to-cyan-500 text-white flex items-center justify-center shrink-0 shadow-sm mt-0.5">
         <Satellite className="w-4 h-4" />
@@ -72,11 +77,16 @@ export default function MessageBubble({ message, isLast = false }) {
                 visualEvidence={message.visualEvidence}
                 executionTrace={message.executionTrace}
                 detectedModality={message.detectedModality || message.modality}
+                isAnimated={isNew}
               />
 
               {/* Visual Evidence (Overlay / Heatmap / Grounding) */}
               {(message.visualEvidence?.image_base64 || message.toolArtifacts?.visual_evidence?.image_base64) && (
-                <div className="mt-3.5 pt-3 border-t border-slate-100">
+                <div
+                  className={`mt-3.5 pt-3 border-t border-slate-100 ${
+                    isNew ? 'animate-reveal-3' : ''
+                  }`}
+                >
                   <div className="rounded-xl overflow-hidden border border-brand-border bg-slate-900 relative group">
                     <img
                       src={message.visualEvidence?.image_base64 || message.toolArtifacts?.visual_evidence?.image_base64}
@@ -100,7 +110,11 @@ export default function MessageBubble({ message, isLast = false }) {
 
               {/* Analyzed Thumbnail & Land Cover Breakdown (if no visual evidence overlay) */}
               {!message.visualEvidence?.image_base64 && !message.toolArtifacts?.visual_evidence?.image_base64 && (message.imagePreviewUrl || predictions.length > 0) && (
-                <div className="mt-3.5 pt-3 border-t border-slate-100 grid grid-cols-1 sm:grid-cols-2 gap-3.5 items-start">
+                <div
+                  className={`mt-3.5 pt-3 border-t border-slate-100 grid grid-cols-1 sm:grid-cols-2 gap-3.5 items-start ${
+                    isNew ? 'animate-reveal-3' : ''
+                  }`}
+                >
                   {message.imagePreviewUrl && (
                     <div className="rounded-xl overflow-hidden border border-brand-border bg-slate-50 relative group">
                       <img
@@ -127,13 +141,17 @@ export default function MessageBubble({ message, isLast = false }) {
 
         {/* Follow-up Suggestion Chips (Only on latest message) */}
         {isLast && !message.isError && (
-          <div className="flex flex-wrap items-center gap-1.5 pt-1">
+          <div
+            className={`flex flex-wrap items-center gap-1.5 pt-1 ${
+              isNew ? 'animate-reveal-4' : ''
+            }`}
+          >
             {FOLLOW_UPS.map((q, idx) => (
               <button
                 key={idx}
                 type="button"
                 onClick={() => setQueryInput(q)}
-                className="px-3 py-1 rounded-full bg-slate-100/80 hover:bg-brand-blue-tint text-slate-600 hover:text-brand-blue text-[11px] font-medium border border-slate-200 transition-colors shadow-2xs"
+                className="px-3 py-1 rounded-full bg-slate-100/80 hover:bg-brand-blue-tint text-slate-600 hover:text-brand-blue text-[11px] font-medium border border-slate-200 transition-colors shadow-2xs cursor-pointer"
               >
                 {q}
               </button>

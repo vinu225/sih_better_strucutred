@@ -28,3 +28,51 @@
 ::-webkit-scrollbar-thumb:hover {
   background: #94a3b8;
 }
+
+/* Smooth reveal animation for assistant message parts */
+@keyframes fadeSlideUp {
+  0% {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-reveal-0 {
+  animation: fadeSlideUp 250ms ease-out forwards;
+}
+
+.animate-reveal-1 {
+  animation: fadeSlideUp 250ms ease-out 70ms forwards;
+  opacity: 0;
+}
+
+.animate-reveal-2 {
+  animation: fadeSlideUp 250ms ease-out 140ms forwards;
+  opacity: 0;
+}
+
+.animate-reveal-3 {
+  animation: fadeSlideUp 250ms ease-out 210ms forwards;
+  opacity: 0;
+}
+
+.animate-reveal-4 {
+  animation: fadeSlideUp 250ms ease-out 280ms forwards;
+  opacity: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-reveal-0,
+  .animate-reveal-1,
+  .animate-reveal-2,
+  .animate-reveal-3,
+  .animate-reveal-4 {
+    animation: none !important;
+    opacity: 1 !important;
+    transform: none !important;
+  }
+}

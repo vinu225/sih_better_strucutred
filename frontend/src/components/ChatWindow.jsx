@@ -1,19 +1,26 @@
 import React, { useEffect, useRef } from 'react';
-import { useChat } from '../context/ChatContext';
+import { useChat, CHAT_PIPELINE_STEPS } from '../context/ChatContext';
 import MessageBubble from './MessageBubble';
 import EmptyState from './EmptyState';
 import ChatInput from './ChatInput';
-import { Satellite, Loader2 } from 'lucide-react';
+import AnalysisProgress from './AnalysisProgress';
 
 export default function ChatWindow() {
-  const { messages, isAnalyzing } = useChat();
+  const { messages, isAnalyzing, analysisStepIndex } = useChat();
   const scrollRef = useRef(null);
+  const bottomAnchorRef = useRef(null);
+
+  const prefersReducedMotion =
+    typeof window !== 'undefined' &&
+    window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
   useEffect(() => {
-    if (scrollRef.current) {
+    if (bottomAnchorRef.current) {
+      bottomAnchorRef.current.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    } else if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [messages, isAnalyzing]);
+  }, [messages, isAnalyzing, analysisStepIndex]);
 
   return (
     <div className="bg-white rounded-2xl border border-brand-border p-5 shadow-soft flex flex-col h-[640px]">
@@ -31,18 +38,17 @@ export default function ChatWindow() {
           ))
         )}
 
-        {/* Loading Indicator when analyzing */}
+        {/* Loading Indicator with Animated Step Chips */}
         {isAnalyzing && (
-          <div className="flex items-start gap-3 mb-6">
-            <div className="w-8 h-8 rounded-xl bg-gradient-to-tr from-brand-blue to-cyan-500 text-white flex items-center justify-center shrink-0 shadow-sm animate-bounce">
-              <Satellite className="w-4 h-4" />
-            </div>
-            <div className="bg-slate-50 border border-slate-200 rounded-2xl rounded-tl-xs p-3.5 flex items-center gap-2.5 text-xs text-brand-dark">
-              <Loader2 className="w-3.5 h-3.5 animate-spin text-brand-blue" />
-              <span className="font-medium">Analyzing the satellite image with SatQuery AI...</span>
-            </div>
-          </div>
+          <AnalysisProgress
+            title="Analyzing the image..."
+            steps={CHAT_PIPELINE_STEPS}
+            activeStepIndex={analysisStepIndex}
+            reducedMotion={prefersReducedMotion}
+          />
         )}
+
+        <div ref={bottomAnchorRef} className="h-1" />
       </div>
 
       {/* Pinned Bottom Input */}
