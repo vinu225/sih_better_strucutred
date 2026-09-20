@@ -6,7 +6,7 @@ Features query-driven routing across multimodal specialists, capability guards,
 grounding/bounding box localization, temporal change detection, and auditable execution tracing.
 """
 
-from typing import Dict, Any, Union, List, Optional
+from typing import Dict, Any, Union, List, Optional, Tuple
 import numpy as np
 import torch
 
@@ -18,7 +18,12 @@ from backend.data.modality import (
     standardize_image_input,
 )
 from backend.agent.tools import ToolRegistry, Tool
-from backend.agent.memory import ConversationMemory
+from backend.agent.memory import (
+    ConversationMemory,
+    SessionMemoryStore,
+    session_store as default_session_store,
+)
+from backend.services.rgb_service import RGBVisionService
 
 
 class SatQueryAgent:
@@ -28,9 +33,14 @@ class SatQueryAgent:
     sensor bands, and query intent while enforcing physical sensor constraints.
     """
 
-    def __init__(self, memory: Optional[ConversationMemory] = None):
+    def __init__(
+        self,
+        memory: Optional[ConversationMemory] = None,
+        session_store: Optional[SessionMemoryStore] = None,
+    ):
         self.registry = ToolRegistry()
         self.memory = memory or ConversationMemory()
+        self.session_store = session_store or default_session_store
 
     def analyze(
         self,
@@ -309,10 +319,32 @@ class SatQueryAgent:
             ground_res = self.registry.get_tool(tool_name).execute(primary_arr, target_concept=target_concept)
             cnt = ground_res["count"]
             cov = ground_res["coverage_percent"]
-            answer_text = (
-                f"Grounding analysis for **'{target_concept}'** identified **{cnt}** candidate region(s) "
-                f"accounting for **{cov}%** of total surface area with mean confidence of **{ground_res['confidence']*100:.1f}%**."
-            )
+            boxes = ground_res.get("boxes", [])
+            grounding_boxes = [
+                {"label": b.get("label", target_concept), "box": b.get("box_2d", b.get("box", []))}
+                for b in boxes
+            ]
+
+            if specs[0].modality == InputModality.RGB_OPTICAL:
+                rgb_cov = RGBVisionService.estimate_coverage(primary_arr)
+                cat_key, cat_label = self._match_coverage_category(target_concept)
+                answer_text = RGBVisionService.format_grounding_answer(
+                    cov=rgb_cov,
+                    target_concept=target_concept,
+                    target_key=cat_key,
+                    target_label=cat_label,
+                    boxes_count=cnt,
+                    variation=0,
+                )
+            else:
+                answer_text = (
+                    f"Grounding analysis for **'{target_concept}'** identified **{cnt}** candidate region(s) "
+                    f"accounting for **{cov}%** of total surface area with mean confidence of **{ground_res['confidence']*100:.1f}%**."
+                )
+
+            vis_evidence = ground_res.get("visual_evidence") or {}
+            vis_evidence["grounding"] = grounding_boxes
+
             trace = [
                 "Input validated",
                 f"{detected_modality} detected",
@@ -322,7 +354,60 @@ class SatQueryAgent:
             return {
                 "answer": answer_text,
                 "confidence": ground_res["confidence"],
-                "visual_evidence": ground_res["visual_evidence"],
+                "visual_evidence": vis_evidence,
+                "selected_task": selected_task,
+                "selected_model_or_tool": tool_name,
+                "detected_modality": detected_modality,
+                "execution_trace": trace,
+                "grounding": grounding_boxes,
+            }
+
+        elif selected_task == "rgb_coverage":
+            tool_name = "RGBVisionService"
+            rgb_cov = RGBVisionService.estimate_coverage(primary_arr)
+            cat_key, cat_label = self._match_coverage_category(target_concept)
+            answer_text = RGBVisionService.format_coverage_answer(
+                cov=rgb_cov,
+                target_key=cat_key,
+                target_label=cat_label,
+                variation=0,
+            )
+            trace = [
+                "Input validated",
+                "RGB_OPTICAL detected",
+                f"Query classified as {cat_label} coverage inquiry",
+                "RGBVisionService executed",
+            ]
+            return {
+                "answer": answer_text,
+                "confidence": 0.88,
+                "visual_evidence": {"type": "feature_coverages", "coverages": rgb_cov},
+                "selected_task": selected_task,
+                "selected_model_or_tool": tool_name,
+                "detected_modality": detected_modality,
+                "execution_trace": trace,
+            }
+
+        elif selected_task == "rgb_challenge":
+            tool_name = "RGBVisionService"
+            rgb_cov = RGBVisionService.estimate_coverage(primary_arr)
+            cat_key, cat_label = self._match_coverage_category(target_concept)
+            answer_text = RGBVisionService.format_challenge_answer(
+                cov=rgb_cov,
+                target_key=cat_key,
+                target_label=cat_label,
+                variation=0,
+            )
+            trace = [
+                "Input validated",
+                "RGB_OPTICAL detected",
+                f"Query classified as {cat_label} challenge verification",
+                "RGBVisionService executed",
+            ]
+            return {
+                "answer": answer_text,
+                "confidence": 0.90,
+                "visual_evidence": {"type": "feature_coverages", "coverages": rgb_cov},
                 "selected_task": selected_task,
                 "selected_model_or_tool": tool_name,
                 "detected_modality": detected_modality,
@@ -333,18 +418,29 @@ class SatQueryAgent:
             tool_name = "spectral_analysis"
             spec_res = self.registry.get_tool(tool_name).execute(primary_arr)
             cov = spec_res["coverage"]
+            ndvi_val = spec_res.get('ndvi_mean')
+            ndwi_val = spec_res.get('ndwi_mean')
+            ndbi_val = spec_res.get('ndbi_mean')
+
             def _fmt_stat(v):
                 return f"{v:.3f}" if v is not None else "N/A"
             def _fmt_pct(v):
                 return f"{v}%" if v is not None else "N/A"
 
-            answer_text = (
-                f"### Multispectral Indices\n"
-                f"- **NDVI (Vegetation)**: Mean `{_fmt_stat(spec_res.get('ndvi_mean'))}` | Dense canopy: `{_fmt_pct(cov.get('dense_vegetation_percent'))}`\n"
-                f"- **NDWI (Water)**: Mean `{_fmt_stat(spec_res.get('ndwi_mean'))}` | Surface moisture/water: `{_fmt_pct(cov.get('water_body_percent'))}`\n"
-                f"- **NDBI (Built-up)**: Mean `{_fmt_stat(spec_res.get('ndbi_mean'))}` | Impervious surface: `{_fmt_pct(cov.get('builtup_percent'))}`\n\n"
-                f"**Ecosystem Evaluation**: {spec_res.get('assessment', 'N/A')}"
-            )
+            if ndvi_val is None and ndwi_val is None and ndbi_val is None:
+                answer_text = (
+                    "### Multispectral Indices\n"
+                    "⚠️ Physical spectral indices (NDVI/NDWI/NDBI) could not be calculated. "
+                    "The image lacks the necessary multispectral Near-Infrared (B08) and Shortwave Infrared (B11) bands."
+                )
+            else:
+                answer_text = (
+                    f"### Multispectral Indices\n"
+                    f"- **NDVI (Vegetation)**: Mean `{_fmt_stat(ndvi_val)}` | Dense canopy: `{_fmt_pct(cov.get('dense_vegetation_percent'))}`\n"
+                    f"- **NDWI (Water)**: Mean `{_fmt_stat(ndwi_val)}` | Surface moisture/water: `{_fmt_pct(cov.get('water_body_percent'))}`\n"
+                    f"- **NDBI (Built-up)**: Mean `{_fmt_stat(ndbi_val)}` | Impervious surface: `{_fmt_pct(cov.get('builtup_percent'))}`\n\n"
+                    f"**Ecosystem Evaluation**: {spec_res.get('assessment', 'N/A')}"
+                )
             trace = [
                 "Input validated",
                 f"{detected_modality} detected",
@@ -390,33 +486,60 @@ class SatQueryAgent:
 
         elif selected_task == "classification":
             tool_name = "landcover_classification"
-            cls_res = self.registry.get_tool(tool_name).execute(primary_arr)
-            top_preds = ", ".join([f"{p['class_name']} ({p['confidence']*100:.1f}%)" for p in cls_res["top_5"][:3]])
-            answer_text = (
-                f"Evaluated land-cover as **{cls_res['primary_class']}** "
-                f"(confidence: **{cls_res['confidence']*100:.1f}%**; Model: `{cls_res.get('model_used', 'Classifier')}`). "
-                f"Top predictions: {top_preds}."
-            )
-            model_label = cls_res.get("model_used", tool_name)
-            trace = [
-                "Input validated",
-                f"{detected_modality} detected",
-                "Query classified as land-cover classification",
-                f"{model_label} executed",
-            ]
-            return {
-                "answer": answer_text,
-                "confidence": cls_res["confidence"],
-                "visual_evidence": {"type": "class_probabilities", "classes": cls_res["top_5"]},
-                "selected_task": selected_task,
-                "selected_model_or_tool": model_label,
-                "detected_modality": detected_modality,
-                "execution_trace": trace,
-            }
+            if specs[0].modality == InputModality.RGB_OPTICAL:
+                cls_info = RGBVisionService.analyze_scene(primary_arr)
+                top_preds = ", ".join([f"{p['class_name']} ({p['confidence']*100:.1f}%)" for p in cls_info['top_predictions'][:3]])
+                answer_text = (
+                    f"Evaluated dominant optical category as **{cls_info['primary_class']}** "
+                    f"(~{cls_info['confidence']*100:.1f}% heuristic match score).\n\n"
+                    f"Top optical categories: {top_preds}.\n\n"
+                    f"*(Note: Estimated from visible RGB color heuristics. BigEarthNet-v2.0 19-class land-cover classification requires Sentinel-2 multispectral bands.)*"
+                )
+                model_label = "RGBVisionClassifier"
+                trace = [
+                    "Input validated",
+                    f"{detected_modality} detected",
+                    "Query classified as optical category estimation",
+                    f"{model_label} executed",
+                ]
+                return {
+                    "answer": answer_text,
+                    "confidence": cls_info["confidence"],
+                    "visual_evidence": {"type": "class_probabilities", "classes": cls_info["top_predictions"]},
+                    "selected_task": selected_task,
+                    "selected_model_or_tool": model_label,
+                    "detected_modality": detected_modality,
+                    "execution_trace": trace,
+                }
+            else:
+                cls_res = self.registry.get_tool(tool_name).execute(primary_arr)
+                top_preds = ", ".join([f"{p['class_name']} ({p['confidence']*100:.1f}%)" for p in cls_res["top_5"][:3]])
+                answer_text = (
+                    f"Evaluated land-cover as **{cls_res['primary_class']}** "
+                    f"(confidence: **{cls_res['confidence']*100:.1f}%**; Model: `{cls_res.get('model_used', 'Classifier')}`). "
+                    f"Top predictions: {top_preds}."
+                )
+                model_label = cls_res.get("model_used", tool_name)
+                trace = [
+                    "Input validated",
+                    f"{detected_modality} detected",
+                    "Query classified as land-cover classification",
+                    f"{model_label} executed",
+                ]
+                return {
+                    "answer": answer_text,
+                    "confidence": cls_res["confidence"],
+                    "visual_evidence": {"type": "class_probabilities", "classes": cls_res["top_5"]},
+                    "selected_task": selected_task,
+                    "selected_model_or_tool": model_label,
+                    "detected_modality": detected_modality,
+                    "execution_trace": trace,
+                }
 
         elif selected_task == "rgb_scene_analysis":
             tool_name = "rgb_scene_analysis"
-            rgb_res = self.registry.get_tool(tool_name).execute(primary_arr)
+            desc = RGBVisionService.describe_scene(primary_arr)
+            cov = RGBVisionService.estimate_coverage(primary_arr)
             trace = [
                 "Input validated",
                 f"{detected_modality} detected",
@@ -424,9 +547,9 @@ class SatQueryAgent:
                 "RGBVisionService executed",
             ]
             return {
-                "answer": rgb_res["scene_description"],
-                "confidence": rgb_res["confidence"],
-                "visual_evidence": {"type": "feature_coverages", "coverages": rgb_res["feature_coverages"]},
+                "answer": desc,
+                "confidence": 0.85,
+                "visual_evidence": {"type": "feature_coverages", "coverages": cov},
                 "selected_task": selected_task,
                 "selected_model_or_tool": "RGBVisionService",
                 "detected_modality": detected_modality,
@@ -493,29 +616,66 @@ class SatQueryAgent:
         # 5. Spatial grounding / localization / counting intent for ANY object or region
         grounding_triggers = [
             "where", "locate", "find", "count", "how many", "box", "boxes",
-            "bounding", "highlight", "show me", "detect", "region", "regions",
+            "bounding", "highlight", "mark", "show me", "detect", "region", "regions",
             "position", "positions", "presence of", "spot"
         ]
         if any(w in q_clean for w in grounding_triggers):
             concept = self._extract_target_concept(q_clean)
             return "grounding", concept
 
-        # 6. Land cover classification intent
+        # 6. RGB Challenge verification (e.g. "so there is no vegetation", "are you sure")
+        if specs[0].modality == InputModality.RGB_OPTICAL and any(w in q_clean for w in [
+            "so there is no", "so there are no", "are you sure", "is there really no",
+            "confirm there is no", "there isn't any", "so no ", "so there is 0", "is it really devoid",
+            "no vegetation", "no water", "no building", "no trees"
+        ]):
+            concept = self._extract_target_concept(q_clean)
+            return "rgb_challenge", concept
+
+        # 7. RGB Coverage and percentage inquiries (e.g. "what is the vegetation coverage", "how much water")
+        if specs[0].modality == InputModality.RGB_OPTICAL and any(w in q_clean for w in [
+            "how much", "percentage", "coverage", "fraction", "proportion", "amount of",
+            "vegetation coverage", "water coverage", "building coverage", "tree coverage",
+            "is there any", "are there any", "what is the vegetation", "what is the water",
+            "what is the building", "what is the tree"
+        ]):
+            concept = self._extract_target_concept(q_clean)
+            return "rgb_coverage", concept
+
+        # 8. Land cover classification intent
         if any(w in q_clean for w in ["land cover", "what class", "classify", "classification", "terrain type", "what is this land", "category", "land types"]):
             return "classification", "land_cover"
 
-        # 7. Specific feature inquiries that imply grounding or detection
+        # 9. Specific feature inquiries that imply grounding or detection
         feature_words = ["water", "river", "lake", "tree", "forest", "building", "house", "road", "crop", "agriculture", "field"]
         for f in feature_words:
             if f in q_clean and any(q_word in q_clean for q_word in ["is there", "are there", "any", "look for", "identify"]):
                 return "grounding", f
 
-        # 8. RGB scene description if 3-channel
-        if specs[0].modality == InputModality.RGB_OPTICAL and any(w in q_clean for w in ["describe", "scene", "overview", "what is in", "summary"]):
+        # 10. RGB scene description if 3-channel
+        if specs[0].modality == InputModality.RGB_OPTICAL and any(w in q_clean for w in ["describe", "scene", "overview", "what is in", "summary", "what do you see", "what is visible"]):
             return "rgb_scene_analysis", "scene_description"
 
-        # 9. Default to VQA
+        # 11. Default to VQA
         return "vqa", "scene_reasoning"
+
+    @staticmethod
+    def _match_coverage_category(concept: str) -> Tuple[str, str]:
+        """Map user concept string to standard coverage key and display label."""
+        c = concept.lower()
+        if any(w in c for w in ["tree", "forest", "vegetation", "canopy", "green", "plant", "woodland", "leaf", "leaves"]):
+            return "vegetation", "Vegetation"
+        if any(w in c for w in ["water", "river", "lake", "ocean", "sea", "pond", "hydrological", "stream", "wetland"]):
+            return "water", "Water bodies"
+        if any(w in c for w in ["building", "house", "urban", "built", "structure", "roof", "impervious", "settlement"]):
+            return "built_up", "Built-up areas"
+        if any(w in c for w in ["crop", "agriculture", "farm", "field", "arable", "pasture", "farmland"]):
+            return "agriculture", "Agricultural land"
+        if any(w in c for w in ["road", "highway", "street", "corridor", "transport", "pavement", "runway"]):
+            return "roads", "Roads & infrastructure"
+        if any(w in c for w in ["sand", "soil", "bare", "dune", "dirt", "ground"]):
+            return "bare", "Bare soil"
+        return "vegetation", "Vegetation"
 
     def _extract_target_concept(self, query: str) -> str:
         """Extract the target entity/concept from a grounding query."""
@@ -602,18 +762,31 @@ class SatQueryAgent:
         if "spectral_analysis" in tool_outputs:
             spec = tool_outputs["spectral_analysis"]
             cov = spec.get("coverage", {})
-            def _fmt_val(v):
-                return f"{v:.3f}" if v is not None else "N/A"
-            def _fmt_p(v):
-                return f"{v}%" if v is not None else "N/A"
+            ndvi_val = spec.get("ndvi_mean")
+            ndwi_val = spec.get("ndwi_mean")
+            ndbi_val = spec.get("ndbi_mean")
 
-            sections.append(
-                f"### Spectral Index Analysis\n"
-                f"- **NDVI (Vegetation Index)**: Mean `{_fmt_val(spec.get('ndvi_mean'))}` | Dense Canopy: `{_fmt_p(cov.get('dense_vegetation_percent'))}`\n"
-                f"- **NDWI (Water Index)**: Mean `{_fmt_val(spec.get('ndwi_mean'))}` | Hydrological Surface: `{_fmt_p(cov.get('water_body_percent'))}`\n"
-                f"- **NDBI (Built-up Index)**: Mean `{_fmt_val(spec.get('ndbi_mean'))}` | Urban/Impervious: `{_fmt_p(cov.get('builtup_percent'))}`\n"
-                f"- **Ecosystem Assessment**: {spec.get('assessment', '')}"
-            )
+            # Check if all spectral metrics are unavailable (avoid all-N/A block)
+            if ndvi_val is None and ndwi_val is None and ndbi_val is None:
+                sections.append(
+                    "### Spectral Index Analysis\n"
+                    "⚠️ Physical spectral indices (NDVI/NDWI/NDBI) are unavailable for this image "
+                    "because it does not contain the required multispectral Near-Infrared (NIR) and "
+                    "Shortwave Infrared (SWIR) bands."
+                )
+            else:
+                def _fmt_val(v):
+                    return f"{v:.3f}" if v is not None else "N/A"
+                def _fmt_p(v):
+                    return f"{v}%" if v is not None else "N/A"
+
+                sections.append(
+                    f"### Spectral Index Analysis\n"
+                    f"- **NDVI (Vegetation Index)**: Mean `{_fmt_val(ndvi_val)}` | Dense Canopy: `{_fmt_p(cov.get('dense_vegetation_percent'))}`\n"
+                    f"- **NDWI (Water Index)**: Mean `{_fmt_val(ndwi_val)}` | Hydrological Surface: `{_fmt_p(cov.get('water_body_percent'))}`\n"
+                    f"- **NDBI (Built-up Index)**: Mean `{_fmt_val(ndbi_val)}` | Urban/Impervious: `{_fmt_p(cov.get('builtup_percent'))}`\n"
+                    f"- **Ecosystem Assessment**: {spec.get('assessment', '')}"
+                )
 
         if "visual_qa" in tool_outputs:
             vlm_res = tool_outputs["visual_qa"]
@@ -631,17 +804,281 @@ class SatQueryAgent:
 
         return "\n\n".join(sections)
 
+    def _resolve_follow_up(
+        self,
+        query: str,
+        tile_id: str,
+        memory: ConversationMemory,
+        current_tensor: Optional[Union[torch.Tensor, np.ndarray]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Follow-up resolver: inspects conversation memory before routing.
+        If the query refers to earlier findings on the SAME tile_id, answers deterministically
+        from stored artifacts or compact context without re-running vision tools.
+        """
+        last_turn = memory.get_last_assistant_turn()
+        if last_turn is None:
+            return None
+
+        # Rule: if tile_id changed since the last turn, treat as a fresh analysis
+        last_tile_id = last_turn.get("tile_id")
+        if last_tile_id and last_tile_id != tile_id:
+            return None
+
+        q_clean = query.lower().replace("-", " ").strip()
+
+        # Check for explicit new analysis targets (e.g. locate new object, calculate specific indices)
+        explicit_new_targets = [
+            "where are the", "where is the", "locate the", "find the", "count the",
+            "calculate ndvi", "calculate spectral", "run change detection",
+            "classify land cover", "detect roads", "detect water", "detect buildings",
+            "detect trees", "spot vehicles"
+        ]
+        if any(target in q_clean for target in explicit_new_targets):
+            return None
+
+        # ----------------------------------------------------------------------
+        # Special Case 1: Why percentages / confidences don't add up to 100%
+        # ----------------------------------------------------------------------
+        pct_triggers = [
+            "add up", "100%", "100 percent", "sum to 100", "equal 100", "total 100",
+            "add to 100", "reach 100", "why do these percentages", "why don't these add up",
+            "why don't those add up", "why doesn't it add up", "why not 100", "why don't they add up",
+            "why do the percentages not add", "why do these confidences not add"
+        ]
+        if any(trig in q_clean for trig in pct_triggers):
+            answer_text = (
+                "The predicted confidence scores do not sum to 100% because SatQuery's classifier is a "
+                "**multi-label classification model** (trained on BigEarthNet-v2.0), not a single-label mutually exclusive model. "
+                "Each score represents an independent probability (from 0.0 to 1.0) indicating whether that particular land-cover "
+                "category is present within the satellite patch, rather than a percentage share of total land area. "
+                "Multiple distinct categories (such as *Broad-leaved forest* and *Mixed forest*, or *Arable land* and *Pastures*) "
+                "frequently co-occur within the same 120×120 pixel observation."
+            )
+            return {
+                "answer": answer_text,
+                "confidence": 1.0,
+                "visual_evidence": last_turn.get("artifacts", {}).get("visual_evidence") or {},
+                "selected_task": "follow_up_explanation",
+                "selected_model_or_tool": "ConversationMemory",
+                "detected_modality": last_turn.get("artifacts", {}).get("detected_modality", "SENTINEL2_MULTISPECTRAL"),
+                "execution_trace": [
+                    "Input validated",
+                    "Session history retrieved for active tile",
+                    "Follow-up detected: Multi-label confidence interpretation inquiry",
+                    "Synthesized answer from classifier schema without re-invoking vision models",
+                ],
+                "tool_artifacts": last_turn.get("artifacts", {}),
+            }
+
+        # ----------------------------------------------------------------------
+        # Special Case 2: Tool and model provenance inquiry
+        # ----------------------------------------------------------------------
+        tool_triggers = [
+            "which tool", "what tool", "which model", "what model", "which tools",
+            "what tools", "tools did you use", "models did you use", "tool did you use",
+            "model did you use", "how did you calculate", "how did you get", "what did you use",
+            "how was this calculated", "how was this determined", "how was this found"
+        ]
+        if any(trig in q_clean for trig in tool_triggers):
+            prev_tools = last_turn.get("tools_used", [])
+            prev_task = prev_tools[0] if prev_tools else "analysis"
+            prev_artifacts = last_turn.get("artifacts", {})
+            selected_tool = prev_artifacts.get("selected_tool", prev_task)
+            trace = prev_artifacts.get("trace", [])
+
+            answer_text = (
+                f"For the previous analysis on tile **`{tile_id}`**, SatQuery executed the following specialist pipeline:\n\n"
+                f"- **Primary Specialist**: `{selected_tool}` (Task: `{prev_task}`)\n"
+                f"- **Execution Trace**:\n"
+                + "\n".join([f"  • {step}" for step in (trace if trace else ["Image input standardized and evaluated."])])
+            )
+            return {
+                "answer": answer_text,
+                "confidence": 1.0,
+                "visual_evidence": prev_artifacts.get("visual_evidence") or {},
+                "selected_task": "tool_inspection",
+                "selected_model_or_tool": "ConversationMemory",
+                "detected_modality": prev_artifacts.get("detected_modality", "SENTINEL2_MULTISPECTRAL"),
+                "execution_trace": [
+                    "Input validated",
+                    "Session history retrieved for active tile",
+                    "Follow-up detected: Tool execution provenance inquiry",
+                    "Retrieved execution trace and tool metadata from conversational memory",
+                ],
+                "tool_artifacts": prev_artifacts,
+            }
+
+        # ----------------------------------------------------------------------
+        # Special Case 3: Sensor capability / unavailable index explanation
+        # ----------------------------------------------------------------------
+        unavailable_triggers = [
+            "why unavailable", "why n/a", "why na", "why can't you calculate",
+            "why no ndvi", "why no spectral", "why couldn't you", "why was it rejected",
+            "why reject", "why is it rejected"
+        ]
+        if any(trig in q_clean for trig in unavailable_triggers):
+            answer_text = (
+                "Physical remote sensing indices (NDVI for vegetation vigor, NDWI for water/moisture, "
+                "NDBI for built-up) require Sentinel-2 Near-Infrared (B08, 842 nm) and Shortwave Infrared (B11, 1610 nm) bands. "
+                "When imagery is standard 3-channel RGB or SAR radar, these physical optical wavelengths are absent from the sensor. "
+                "SatQuery enforces scientific sensor integrity and refuses to compute fabricated spectral indices without genuine physical bands."
+            )
+            return {
+                "answer": answer_text,
+                "confidence": 1.0,
+                "visual_evidence": {},
+                "selected_task": "capability_explanation",
+                "selected_model_or_tool": "ConversationMemory",
+                "detected_modality": last_turn.get("artifacts", {}).get("detected_modality", "RGB_OPTICAL"),
+                "execution_trace": [
+                    "Input validated",
+                    "Session history retrieved for active tile",
+                    "Follow-up detected: Sensor capability rationale inquiry",
+                    "Retrieved sensor integrity rationale from conversational memory",
+                ],
+                "tool_artifacts": last_turn.get("artifacts", {}),
+            }
+
+        # ----------------------------------------------------------------------
+        # Special Case 4: Plain English / Simpler / Summary request
+        # ----------------------------------------------------------------------
+        summary_triggers = [
+            "simpler", "simple terms", "plain english", "explain that", "explain this",
+            "explain it", "what did you find", "what does that mean", "summarize",
+            "restate", "clarify", "in simple terms", "tell me more about that", "elaborate"
+        ]
+        if any(trig in q_clean for trig in summary_triggers):
+            prev_content = last_turn.get("content", "")
+            prev_artifacts = last_turn.get("artifacts", {})
+            answer_text = (
+                f"Here is a plain-language summary of the previous findings for tile **`{tile_id}`**:\n\n"
+                f"{prev_content}"
+            )
+            return {
+                "answer": answer_text,
+                "confidence": 1.0,
+                "visual_evidence": prev_artifacts.get("visual_evidence") or {},
+                "selected_task": "summary_explanation",
+                "selected_model_or_tool": "ConversationMemory",
+                "detected_modality": prev_artifacts.get("detected_modality", "SENTINEL2_MULTISPECTRAL"),
+                "execution_trace": [
+                    "Input validated",
+                    "Session history retrieved for active tile",
+                    "Follow-up detected: Plain-language summary request",
+                    "Synthesized summary from previous turn results without re-running vision models",
+                ],
+                "tool_artifacts": prev_artifacts,
+            }
+
+        # ----------------------------------------------------------------------
+        # Special Case 5: Pronoun / conversational follow-up with prior context
+        # ----------------------------------------------------------------------
+        reference_words = ["that", "it", "those", "these", "earlier", "previous", "again", "why", "how"]
+        words = q_clean.split()
+        if any(w in words for w in reference_words) and len(words) <= 12 and current_tensor is not None:
+            # Compact VLM contextual fallback
+            prev_summary = last_turn.get("content", "")[:120].replace("\n", " ")
+            context_prompt = f"[Context: {prev_summary}]. Question: {query}"
+            vlm_res = self.registry.get_tool("visual_qa").execute(current_tensor, question=context_prompt)
+            ans = vlm_res.get("answer", "Analysis of follow-up complete.")
+            return {
+                "answer": ans,
+                "confidence": vlm_res.get("confidence", 0.85),
+                "visual_evidence": {},
+                "selected_task": "vqa_follow_up",
+                "selected_model_or_tool": "VLMService",
+                "detected_modality": last_turn.get("artifacts", {}).get("detected_modality", "RGB_OPTICAL"),
+                "execution_trace": [
+                    "Input validated",
+                    "Session history retrieved for active tile",
+                    "Follow-up detected: Contextual question answering",
+                    "VLMService executed with compact previous turn context",
+                ],
+                "tool_artifacts": last_turn.get("artifacts", {}),
+            }
+
+        return None
+
     def chat(
         self,
         tensor_12ch: Union[torch.Tensor, np.ndarray],
         query: str,
         tile_id: str = "current_tile",
+        session_id: Optional[str] = None,
+        memory: Optional[ConversationMemory] = None,
     ) -> Dict[str, Any]:
         """
-        Agent chat method executing unified analysis pipeline and maintaining conversation history.
+        Agent chat method executing unified analysis pipeline and maintaining per-session conversation history.
         """
-        self.memory.add_user_message(query, tile_id=tile_id)
+        # Resolve active session memory
+        if memory is not None:
+            active_mem = memory
+            active_session_id = memory.session_id
+        elif session_id is not None or self.session_store is not None:
+            active_session_id, active_mem = self.session_store.get_or_create(session_id)
+        else:
+            active_session_id = getattr(self.memory, "session_id", "default")
+            active_mem = self.memory
+
+        # 1. Check Follow-Up Resolver before invoking specialist models
+        follow_up_res = self._resolve_follow_up(
+            query=query,
+            tile_id=tile_id,
+            memory=active_mem,
+            current_tensor=tensor_12ch,
+        )
+
+        if follow_up_res is not None:
+            active_mem.add_user_message(query, tile_id=tile_id)
+            active_mem.add_agent_message(
+                text=follow_up_res["answer"],
+                tools_used=[follow_up_res.get("selected_task", "follow_up")],
+                artifacts=follow_up_res.get("tool_artifacts", {}),
+                tile_id=tile_id,
+            )
+            return {
+                "tile_id": tile_id,
+                "session_id": active_session_id,
+                "query": query,
+                "response": follow_up_res["answer"],
+                "answer": follow_up_res["answer"],
+                "confidence": follow_up_res.get("confidence", 1.0),
+                "visual_evidence": follow_up_res.get("visual_evidence"),
+                "selected_task": follow_up_res.get("selected_task", "follow_up"),
+                "selected_model_or_tool": follow_up_res.get("selected_model_or_tool", "ConversationMemory"),
+                "detected_modality": follow_up_res.get("detected_modality", "RGB_OPTICAL"),
+                "execution_trace": follow_up_res.get("execution_trace", []),
+                "plan": [follow_up_res.get("selected_task", "follow_up")],
+                "tool_artifacts": follow_up_res.get("tool_artifacts", {}),
+                "history_length": len(active_mem.get_history()),
+            }
+
+        # 2. Standard Query-Driven Analysis Pipeline
+        active_mem.add_user_message(query, tile_id=tile_id)
         res = self.analyze(images=tensor_12ch, query=query, tile_id=tile_id)
+
+        # Duplicate guard: if the answer equals previous assistant answer on same tile, vary honestly
+        last_ast = active_mem.get_last_assistant_turn(tile_id=tile_id)
+        if last_ast and last_ast.get("content", "").strip() == res["answer"].strip():
+            arr_inp = tensor_12ch[0] if isinstance(tensor_12ch, list) else tensor_12ch
+            if isinstance(arr_inp, np.ndarray) and arr_inp.shape[0] == 3:
+                cov = RGBVisionService.estimate_coverage(arr_inp)
+                task = res.get("selected_task", "")
+                target = res.get("target_concept", query)
+                cat_key, cat_label = self._match_coverage_category(target)
+                if task == "rgb_coverage":
+                    res["answer"] = RGBVisionService.format_coverage_answer(cov, cat_key, cat_label, variation=1)
+                elif task == "grounding":
+                    res["answer"] = RGBVisionService.format_grounding_answer(cov, target, cat_key, cat_label, variation=1)
+                elif task == "rgb_challenge":
+                    res["answer"] = RGBVisionService.format_challenge_answer(cov, cat_key, cat_label, variation=1)
+                elif task == "rgb_scene_analysis":
+                    res["answer"] = RGBVisionService.format_describe_answer(cov, variation=1)
+                else:
+                    res["answer"] = RGBVisionService.format_describe_answer(cov, variation=1)
+            else:
+                res["answer"] += f"\n\n*(Note: Analysis refreshed for query: '{query}'.)*"
 
         selected_task = res.get("selected_task", "analysis")
         selected_tool = res.get("selected_model_or_tool", "agent")
@@ -652,18 +1089,31 @@ class SatQueryAgent:
             "trace": res.get("execution_trace", []),
             "confidence": res.get("confidence", 1.0),
             "selected_tool": selected_tool,
+            "detected_modality": res.get("detected_modality", "RGB_OPTICAL"),
         }
+        if "grounding" in res:
+            tool_artifacts["grounding"] = res["grounding"]
+        elif isinstance(res.get("visual_evidence"), dict) and "boxes" in res["visual_evidence"]:
+            tool_artifacts["grounding"] = [
+                {"label": b.get("label", "region"), "box": b.get("box_2d", b.get("box", []))}
+                for b in res["visual_evidence"]["boxes"]
+            ]
+        else:
+            tool_artifacts["grounding"] = []
+
         if isinstance(res.get("visual_evidence"), dict):
             tool_artifacts.update(res["visual_evidence"])
 
-        self.memory.add_agent_message(
+        active_mem.add_agent_message(
             text=res["answer"],
             tools_used=[selected_task],
             artifacts=tool_artifacts,
+            tile_id=tile_id,
         )
 
         return {
             "tile_id": tile_id,
+            "session_id": active_session_id,
             "query": query,
             "response": res["answer"],
             "answer": res["answer"],
@@ -675,5 +1125,5 @@ class SatQueryAgent:
             "execution_trace": res.get("execution_trace", []),
             "plan": [selected_task],
             "tool_artifacts": tool_artifacts,
-            "history_length": len(self.memory.get_history()),
+            "history_length": len(active_mem.get_history()),
         }

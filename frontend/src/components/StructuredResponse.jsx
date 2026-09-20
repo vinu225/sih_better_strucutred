@@ -1,7 +1,6 @@
 import React, { useState } from 'react';
 import {
-  ChevronDown,
-  ChevronRight,
+  Ruler,
   Sparkles,
   Layers,
   AlertTriangle,
@@ -13,6 +12,64 @@ import {
   ScanEye,
   Sliders,
 } from 'lucide-react';
+import CollapsibleCard from './CollapsibleCard';
+
+/**
+ * Splits raw response text into main answer and a trailing note if present.
+ * Handles variations:
+ * - *(Note: ...)*
+ * - (Note: ...)
+ * - *Note: ...*
+ * - Note: ...
+ * - *(Note: ...)
+ * - Notes on own trailing paragraph
+ * Ensures no leftover asterisks or brackets on either answer or note.
+ */
+export function splitAnswerAndNote(rawText) {
+  if (!rawText || typeof rawText !== 'string') {
+    return { answer: rawText || '', note: '' };
+  }
+
+  let text = rawText.trim();
+
+  // Pattern 1: Explicit "Note:" indicator (with or without brackets/asterisks)
+  const noteRegex = /\s*(?:\r?\n|\s)+\*{0,2}\(?\s*Note:\s*([\s\S]*?)\)?\s*\*{0,2}\s*$/i;
+  const match = text.match(noteRegex);
+
+  if (match) {
+    let capturedNote = match[1].trim();
+    // Clean any leading/trailing *, (, ), quotes
+    capturedNote = capturedNote
+      .replace(/^[\*\(\s\)]+|[\*\(\s\)]+$/g, '')
+      .replace(/^Note:\s*/i, '')
+      .trim();
+
+    let cleanAnswer = text.slice(0, match.index).trim();
+    // Clean any dangling markdown artifacts or trailing parentheses/asterisks
+    cleanAnswer = cleanAnswer.replace(/\s*\*{1,2}\s*$/, '').trim();
+
+    return { answer: cleanAnswer, note: capturedNote };
+  }
+
+  // Pattern 2: Trailing paragraph with sensor/heuristic disclaimers enclosed in *(...)*
+  const sensorNoteRegex = /\s*(?:\r?\n|\s)+\*{0,2}\(\s*([\s\S]*?(?:heuristic|multispectral|NIR|SWIR|Sentinel-2|sensor integrity|spectral indices)[\s\S]*?)\)\s*\*{0,2}\s*$/i;
+  const sensorMatch = text.match(sensorNoteRegex);
+
+  if (sensorMatch) {
+    let capturedNote = sensorMatch[1].trim();
+    capturedNote = capturedNote
+      .replace(/^[\*\(\s\)]+|[\*\(\s\)]+$/g, '')
+      .replace(/^Note:\s*/i, '')
+      .trim();
+
+    let cleanAnswer = text.slice(0, sensorMatch.index).trim();
+    cleanAnswer = cleanAnswer.replace(/\s*\*{1,2}\s*$/, '').trim();
+
+    return { answer: cleanAnswer, note: capturedNote };
+  }
+
+  return { answer: text, note: '' };
+}
 
 /**
  * Format inline text (e.g. **bold**, `code`).
@@ -175,10 +232,11 @@ export default function StructuredResponse({
   executionTrace = [],
   detectedModality = 'RGB optical',
 }) {
-  const [isComputedOpen, setIsComputedOpen] = useState(false);
+  // 1. Separate main answer from trailing note
+  const { answer: cleanText, note: noteText } = splitAnswerAndNote(text);
 
-  // Parse markdown fallback
-  const { shortAnswer: parsedShortAnswer, sections: parsedSections } = parseMarkdownSections(text);
+  // 2. Parse markdown sections from cleaned text
+  const { shortAnswer: parsedShortAnswer, sections: parsedSections } = parseMarkdownSections(cleanText);
 
   // Derive short answer
   let mainShortAnswer = parsedShortAnswer;
@@ -223,83 +281,90 @@ export default function StructuredResponse({
     ? executionTrace
     : (toolArtifacts?.trace || []);
 
+  const isRgbNote = noteText && /rgb|color|optical|visible|heuristic/i.test(noteText);
+  const noteBadgeText = isRgbNote ? 'RGB estimate' : 'Sensor note';
+  const noteBadge = (
+    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium border border-[#cbd5e1] bg-white text-[#475569] truncate">
+      {noteBadgeText}
+    </span>
+  );
+
   return (
     <div className="space-y-3.5">
-      {/* 1. Short Answer */}
+      {/* 1. Main Answer Text (Markdown rendered, without trailing note or leftover asterisks) */}
       <div className="text-xs sm:text-sm text-slate-800 leading-relaxed bg-slate-50/60 p-3.5 rounded-xl border border-slate-100">
         <p className="font-normal">{formatInlineText(mainShortAnswer)}</p>
       </div>
 
-      {/* 2. Collapsible "How this was computed" Panel */}
-      <div className="border border-brand-border/80 rounded-xl overflow-hidden bg-white shadow-2xs">
-        {/* Panel Accordion Header */}
-        <button
-          type="button"
-          onClick={() => setIsComputedOpen((prev) => !prev)}
-          className="w-full px-3.5 py-2.5 bg-slate-50/80 hover:bg-slate-100/80 transition-colors flex items-center justify-between text-left group cursor-pointer"
+      {/* 2. Collapsible "About this estimate" Card (Directly ABOVE "How this was computed") */}
+      {noteText && (
+        <CollapsibleCard
+          id="response-note"
+          tone="info"
+          title="About this estimate"
+          icon={Ruler}
+          iconClassName="p-1.5 rounded-md bg-[#eef2f6] text-[#64748b] flex items-center justify-center shrink-0"
+          badge={noteBadge}
         >
-          <div className="flex items-center gap-2 min-w-0">
-            <div className="p-1 rounded-md bg-brand-blue-tint text-brand-blue shrink-0">
-              <Sparkles className="w-3.5 h-3.5" />
-            </div>
-            <span className="text-xs font-semibold text-brand-dark">How this was computed</span>
-            {/* 4. Detected Modality Badge */}
-            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-blue-50 text-brand-blue border border-blue-100 truncate">
-              <Layers className="w-2.5 h-2.5 shrink-0" />
-              <span>{displayModality}</span>
-            </span>
-          </div>
+          <p className="text-[14px] text-[#475569] leading-[1.6] font-normal">
+            {formatInlineText(noteText)}
+          </p>
+        </CollapsibleCard>
+      )}
 
-          <div className="flex items-center gap-1.5 text-slate-400 group-hover:text-slate-600 transition-colors shrink-0">
-            <span className="text-[11px] font-medium text-slate-500">
-              {normalizedToolList.length} tool{normalizedToolList.length !== 1 ? 's' : ''}
-            </span>
-            {isComputedOpen ? (
-              <ChevronDown className="w-4 h-4 text-slate-500 transition-transform duration-200" />
-            ) : (
-              <ChevronRight className="w-4 h-4 text-slate-400 transition-transform duration-200" />
-            )}
-          </div>
-        </button>
-
-        {/* Collapsed/Expanded Content */}
-        {isComputedOpen && (
-          <div className="p-3.5 space-y-3 divide-y divide-slate-100 bg-white border-t border-slate-100">
-            {/* Auditable Execution Trace Steps */}
-            {traceList.length > 0 && (
-              <div className="pb-3 space-y-1.5">
-                <span className="text-[11px] font-bold text-slate-700 uppercase tracking-wider block">
-                  Auditable Execution Pipeline
-                </span>
-                <div className="flex flex-wrap gap-1.5">
-                  {traceList.map((step, sIdx) => (
-                    <span
-                      key={sIdx}
-                      className="inline-flex items-center gap-1 px-2 py-1 rounded bg-slate-100 border border-slate-200 text-[11px] text-slate-700 font-medium font-mono"
-                    >
-                      <span className="w-3.5 h-3.5 rounded-full bg-brand-blue/10 text-brand-blue flex items-center justify-center text-[9px] font-bold">
-                        {sIdx + 1}
-                      </span>
-                      {step}
+      {/* 3. Collapsible "How this was computed" Card */}
+      <CollapsibleCard
+        id="how-computed"
+        title="How this was computed"
+        icon={Sparkles}
+        iconClassName="p-1 rounded-md bg-brand-blue-tint text-brand-blue shrink-0"
+        badge={
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-blue-50 text-brand-blue border border-blue-100 truncate">
+            <Layers className="w-2.5 h-2.5 shrink-0" />
+            <span>{displayModality}</span>
+          </span>
+        }
+        headerRight={
+          <span className="text-[11px] font-medium text-slate-500">
+            {normalizedToolList.length} tool{normalizedToolList.length !== 1 ? 's' : ''}
+          </span>
+        }
+      >
+        <div className="space-y-3 divide-y divide-slate-100">
+          {/* Auditable Execution Trace Steps */}
+          {traceList.length > 0 && (
+            <div className="pb-3 space-y-1.5">
+              <span className="text-[11px] font-bold text-slate-700 uppercase tracking-wider block">
+                Auditable Execution Pipeline
+              </span>
+              <div className="flex flex-wrap gap-1.5">
+                {traceList.map((step, sIdx) => (
+                  <span
+                    key={sIdx}
+                    className="inline-flex items-center gap-1 px-2 py-1 rounded bg-slate-100 border border-slate-200 text-[11px] text-slate-700 font-medium font-mono"
+                  >
+                    <span className="w-3.5 h-3.5 rounded-full bg-brand-blue/10 text-brand-blue flex items-center justify-center text-[9px] font-bold">
+                      {sIdx + 1}
                     </span>
-                  ))}
-                </div>
+                    {step}
+                  </span>
+                ))}
               </div>
-            )}
+            </div>
+          )}
 
-            {normalizedToolList.map((toolKey, idx) => (
-              <ToolRow
-                key={idx}
-                toolKey={toolKey}
-                toolArtifacts={toolArtifacts}
-                visualEvidence={visualEvidence}
-                parsedSections={parsedSections}
-                detectedModality={displayModality}
-              />
-            ))}
-          </div>
-        )}
-      </div>
+          {normalizedToolList.map((toolKey, idx) => (
+            <ToolRow
+              key={idx}
+              toolKey={toolKey}
+              toolArtifacts={toolArtifacts}
+              visualEvidence={visualEvidence}
+              parsedSections={parsedSections}
+              detectedModality={displayModality}
+            />
+          ))}
+        </div>
+      </CollapsibleCard>
     </div>
   );
 }

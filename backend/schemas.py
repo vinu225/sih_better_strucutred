@@ -26,6 +26,19 @@ class TileListResponse(BaseModel):
     tiles: List[TileSummary]
 
 
+class UploadTileResponse(BaseModel):
+    """Response returned when an image tile is uploaded and standardized."""
+    status: str = "success"
+    tile_id: str
+    shape: List[int]
+    modality: str
+    detection_basis: str
+    basis_label: str
+    display_label: str
+    available_analyses: List[str]
+    session_id: Optional[str] = None
+
+
 # ---------------------------------------------------------------------------
 # Modality schemas
 # ---------------------------------------------------------------------------
@@ -188,14 +201,15 @@ class ChangeDetectionRequest(BaseModel):
 
 
 class ChangeDetectionResponse(BaseModel):
-    tile_id_before: str
-    tile_id_after: str
+    tile_id_before: Optional[str] = None
+    tile_id_after: Optional[str] = None
     pair_type: str
     co_registered: bool
     warning: Optional[str] = None
     image_before: Dict[str, Any]
     image_after: Dict[str, Any]
     pixel_change: Optional[Dict[str, Any]] = None
+
 
 
 # ---------------------------------------------------------------------------
@@ -206,6 +220,7 @@ class AgentChatRequest(BaseModel):
     tile_id: str = Field(default="sample_forest_tile")
     query: str = Field(..., description="User question or analysis command for SatQuery AI Agent")
     modality_hint: Optional[str] = Field(default=None)
+    session_id: Optional[str] = Field(default=None, description="Optional session ID to maintain conversation memory")
 
 
 class AgentChatResponse(BaseModel):
@@ -215,6 +230,7 @@ class AgentChatResponse(BaseModel):
     plan: List[str]
     tool_artifacts: Dict[str, Any]
     history_length: int
+    session_id: Optional[str] = None
     answer: Optional[str] = None
     confidence: Optional[float] = None
     visual_evidence: Optional[Any] = None
@@ -234,6 +250,7 @@ class AnalyzeRequest(BaseModel):
     query: str = Field(..., description="Natural language question or analysis command")
     modality_hint: Optional[str] = Field(default=None, description="Optional modality hint for primary tile")
     modality_hints: Optional[List[str]] = Field(default=None, description="Optional modality hints for image pair")
+    session_id: Optional[str] = Field(default=None, description="Optional session ID for conversational memory")
 
 
 class AnalyzeResponse(BaseModel):
@@ -244,4 +261,30 @@ class AnalyzeResponse(BaseModel):
     selected_model_or_tool: str
     detected_modality: str
     execution_trace: List[str]
+    session_id: Optional[str] = None
+    history_length: Optional[int] = None
+
+
+# ---------------------------------------------------------------------------
+# Session & Memory Management Schemas
+# ---------------------------------------------------------------------------
+
+class MessageHistoryItem(BaseModel):
+    role: str
+    content: str
+    tile_id: Optional[str] = None
+    tools_used: Optional[List[str]] = None
+    timestamp: Optional[str] = None
+
+
+class SessionHistoryResponse(BaseModel):
+    session_id: str
+    history_length: int
+    messages: List[MessageHistoryItem]
+
+
+class SessionDeleteResponse(BaseModel):
+    session_id: str
+    status: str = "deleted"
+    message: str = "Session memory cleared."
 

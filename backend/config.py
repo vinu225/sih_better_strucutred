@@ -73,3 +73,5 @@ API_HOST = os.getenv("SATQUERY_HOST", "0.0.0.0")
 API_PORT = int(os.getenv("SATQUERY_PORT", "8000"))
 API_TITLE = "SatQuery Earth Observation VLM & Agent API"
 API_VERSION = "1.0.0"
+MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "50"))
+

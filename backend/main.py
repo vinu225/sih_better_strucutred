@@ -60,14 +60,22 @@ def custom_openapi():
     if app.openapi_schema:
         return app.openapi_schema
     from fastapi.openapi.utils import get_openapi
+    from backend.schemas import ChangeDetectionRequest
+    
     openapi_schema = get_openapi(
         title=app.title,
         version=app.version,
         description=app.description,
         routes=app.routes,
     )
+    
+    # Ensure ChangeDetectionRequest schema component is registered for $ref lookups
+    schemas = openapi_schema.setdefault("components", {}).setdefault("schemas", {})
+    if "ChangeDetectionRequest" not in schemas:
+        schemas["ChangeDetectionRequest"] = ChangeDetectionRequest.model_json_schema()
+
     # Ensure Swagger UI recognizes array of UploadFile as file inputs
-    for schema in openapi_schema.get("components", {}).get("schemas", {}).values():
+    for schema in schemas.values():
         if "properties" in schema:
             for prop in schema["properties"].values():
                 if prop.get("type") == "array" and "items" in prop:
@@ -78,6 +86,7 @@ def custom_openapi():
 
 
 app.openapi = custom_openapi
+
 
 
 if __name__ == "__main__":
